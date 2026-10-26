@@ -625,6 +625,59 @@ void test_awaiting_another_coroutine() {
 	std::cout << "  ✓ A coroutine can await another one in the same program" << std::endl;
 }
 
+void test_auto_await_keeps_sequential_calls_sequential() {
+	std::cout << "Testing implicit await on annotated API calls..." << std::endl;
+
+	const Program program = compile(
+		"@auto_await\n"
+		"func move(sig, direction):\n"
+		"\tvar done = await sig\n"
+		"\treturn direction\n"
+		"func run(sig):\n"
+		"\tmove(sig, 1)\n"
+		"\tmove(sig, 2)\n"
+		"\treturn 9\n");
+	if (program.elf.empty()) {
+		return;
+	}
+
+	const FunctionSignature* run_signature = signature_of(program, "run");
+	check(run_signature != nullptr && run_signature->is_coroutine,
+		"the function calling an auto-awaited API is a coroutine");
+	if (run_signature == nullptr || !run_signature->is_coroutine) {
+		return;
+	}
+
+	auto machine = boot(program);
+	const Call started = run(*machine, "run", { 0 });
+	check_eq<int32_t>(started.type, int32_t(Variant::NIL),
+		"the first API operation suspends the caller");
+	check_eq(g_host.guest_calls, 1, "only the first API call has started");
+	check_eq<size_t>(g_host.suspensions.size(), 2,
+		"the API coroutine and its caller both suspended");
+	if (g_host.suspensions.size() < 2) {
+		return;
+	}
+
+	const int64_t first_result = resume_suspension(*machine, 0, 0);
+	check_eq<int64_t>(first_result, 1, "the first operation returned");
+	check_eq<int64_t>(resume_suspension(*machine, 1, first_result), 0,
+		"the caller suspended again before starting its second operation");
+	check_eq(g_host.guest_calls, 2, "the second API call starts after resumption");
+	check_eq<size_t>(g_host.suspensions.size(), 4,
+		"the second API coroutine and caller each suspended");
+	if (g_host.suspensions.size() < 4) {
+		return;
+	}
+
+	const int64_t second_result = resume_suspension(*machine, 2, 0);
+	check_eq<int64_t>(second_result, 2, "the second operation returned");
+	check_eq<int64_t>(resume_suspension(*machine, 3, second_result), 9,
+		"the caller finished after both operations");
+
+	std::cout << "  ✓ Annotated API calls suspend their caller in sequence" << std::endl;
+}
+
 void test_a_hosted_call_spills_arguments() {
 	std::cout << "Testing a wide call into a coroutine..." << std::endl;
 
@@ -789,6 +842,7 @@ int main() {
 	test_awaiting_in_a_loop();
 	test_an_unused_await_is_kept();
 	test_awaiting_another_coroutine();
+	test_auto_await_keeps_sequential_calls_sequential();
 	test_a_hosted_call_spills_arguments();
 	test_calling_a_coroutine_without_awaiting_it();
 	test_a_global_read_is_not_hoisted_across_a_hosted_call();

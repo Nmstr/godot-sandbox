@@ -182,6 +182,7 @@ FunctionDecl clone_function(const FunctionDecl& value) {
 	out.column = value.column;
 	out.doc_comment = value.doc_comment;
 	out.is_coroutine = value.is_coroutine;
+	out.auto_await = value.auto_await;
 	out.is_static = value.is_static;
 	out.is_abstract = value.is_abstract;
 	out.requires_host_hook = value.requires_host_hook;

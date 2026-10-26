@@ -37,6 +37,143 @@ std::string source_line_at(const std::string& source, int line) {
 	}
 	return source.substr(begin, end - begin);
 }
+
+void auto_await_expr(ExprPtr& expr, const std::unordered_set<std::string>& functions,
+	bool& is_coroutine, bool already_awaited = false);
+
+void auto_await_function(FunctionDecl& function,
+	const std::unordered_set<std::string>& functions);
+
+void auto_await_pattern(MatchPattern& pattern,
+	const std::unordered_set<std::string>& functions, bool& is_coroutine) {
+	auto_await_expr(pattern.value, functions, is_coroutine);
+	for (MatchPatternPtr& element : pattern.elements)
+		auto_await_pattern(*element, functions, is_coroutine);
+	for (MatchPattern::Entry& entry : pattern.entries) {
+		auto_await_expr(entry.key, functions, is_coroutine);
+		if (entry.value) auto_await_pattern(*entry.value, functions, is_coroutine);
+	}
+	for (MatchPattern::StructEntry& entry : pattern.struct_entries)
+		if (entry.value) auto_await_pattern(*entry.value, functions, is_coroutine);
+}
+
+void auto_await_statements(std::vector<StmtPtr>& statements,
+	const std::unordered_set<std::string>& functions, bool& is_coroutine) {
+	for (StmtPtr& stmt : statements) {
+		if (auto* value = dynamic_cast<ExprStmt*>(stmt.get())) {
+			auto_await_expr(value->expression, functions, is_coroutine);
+		} else if (auto* value = dynamic_cast<VarDeclStmt*>(stmt.get())) {
+			auto_await_expr(value->initializer, functions, is_coroutine);
+			if (value->setter_body) auto_await_function(*value->setter_body, functions);
+			if (value->getter_body) auto_await_function(*value->getter_body, functions);
+		} else if (auto* value = dynamic_cast<AssignStmt*>(stmt.get())) {
+			auto_await_expr(value->target, functions, is_coroutine);
+			auto_await_expr(value->value, functions, is_coroutine);
+		} else if (auto* value = dynamic_cast<ReturnStmt*>(stmt.get())) {
+			auto_await_expr(value->value, functions, is_coroutine);
+		} else if (auto* value = dynamic_cast<IfStmt*>(stmt.get())) {
+			if (value->binding) {
+				auto_await_expr(value->binding->initializer, functions, is_coroutine);
+			} else {
+				auto_await_expr(value->condition, functions, is_coroutine);
+			}
+			auto_await_statements(value->then_branch, functions, is_coroutine);
+			auto_await_statements(value->else_branch, functions, is_coroutine);
+		} else if (auto* value = dynamic_cast<WhileStmt*>(stmt.get())) {
+			auto_await_expr(value->condition, functions, is_coroutine);
+			auto_await_statements(value->body, functions, is_coroutine);
+		} else if (auto* value = dynamic_cast<ForStmt*>(stmt.get())) {
+			auto_await_expr(value->iterable, functions, is_coroutine);
+			auto_await_statements(value->body, functions, is_coroutine);
+		} else if (auto* value = dynamic_cast<MatchStmt*>(stmt.get())) {
+			auto_await_expr(value->subject, functions, is_coroutine);
+			for (MatchStmt::Branch& branch : value->branches) {
+				for (MatchPatternPtr& pattern : branch.patterns)
+					auto_await_pattern(*pattern, functions, is_coroutine);
+				auto_await_expr(branch.guard, functions, is_coroutine);
+				auto_await_statements(branch.body, functions, is_coroutine);
+			}
+		}
+	}
+}
+
+void auto_await_function(FunctionDecl& function,
+	const std::unordered_set<std::string>& functions) {
+	const bool was_coroutine = function.is_coroutine;
+	auto_await_statements(function.body, functions, function.is_coroutine);
+	if (function.is_test && !was_coroutine && function.is_coroutine) {
+		throw CompilerException::semantic_error(
+			"@test function '" + function.name + "' cannot become a coroutine through @auto_await",
+			function.line, function.column, function.name);
+	}
+}
+
+void auto_await_expr(ExprPtr& expr, const std::unordered_set<std::string>& functions,
+	bool& is_coroutine, bool already_awaited) {
+	if (!expr) return;
+	if (auto* value = dynamic_cast<AwaitExpr*>(expr.get())) {
+		auto_await_expr(value->operand, functions, is_coroutine, true);
+		return;
+	}
+	if (auto* value = dynamic_cast<BinaryExpr*>(expr.get())) {
+		auto_await_expr(value->left, functions, is_coroutine);
+		auto_await_expr(value->right, functions, is_coroutine);
+	} else if (auto* value = dynamic_cast<LambdaExpr*>(expr.get())) {
+		auto_await_function(*value->decl, functions);
+	} else if (auto* value = dynamic_cast<UnaryExpr*>(expr.get())) {
+		auto_await_expr(value->operand, functions, is_coroutine);
+	} else if (auto* value = dynamic_cast<TypeTestExpr*>(expr.get())) {
+		auto_await_expr(value->value, functions, is_coroutine);
+	} else if (auto* value = dynamic_cast<CastExpr*>(expr.get())) {
+		auto_await_expr(value->value, functions, is_coroutine);
+	} else if (auto* value = dynamic_cast<TernaryExpr*>(expr.get())) {
+		auto_await_expr(value->condition, functions, is_coroutine);
+		auto_await_expr(value->true_value, functions, is_coroutine);
+		auto_await_expr(value->false_value, functions, is_coroutine);
+	} else if (auto* value = dynamic_cast<CallExpr*>(expr.get())) {
+		for (ExprPtr& argument : value->arguments)
+			auto_await_expr(argument, functions, is_coroutine);
+		if (!already_awaited && functions.find(value->function_name) != functions.end()) {
+			const int line = value->line;
+			const int column = value->column;
+			auto awaited = std::make_unique<AwaitExpr>(std::move(expr));
+			awaited->line = line;
+			awaited->column = column;
+			expr = std::move(awaited);
+			is_coroutine = true;
+		}
+	} else if (auto* value = dynamic_cast<MemberCallExpr*>(expr.get())) {
+		auto_await_expr(value->object, functions, is_coroutine);
+		for (ExprPtr& argument : value->arguments)
+			auto_await_expr(argument, functions, is_coroutine);
+	} else if (auto* value = dynamic_cast<IndexExpr*>(expr.get())) {
+		auto_await_expr(value->object, functions, is_coroutine);
+		auto_await_expr(value->index, functions, is_coroutine);
+	} else if (auto* value = dynamic_cast<ArrayLiteralExpr*>(expr.get())) {
+		for (ExprPtr& element : value->elements)
+			auto_await_expr(element, functions, is_coroutine);
+	} else if (auto* value = dynamic_cast<DictionaryLiteralExpr*>(expr.get())) {
+		for (auto& element : value->elements) {
+			auto_await_expr(element.first, functions, is_coroutine);
+			auto_await_expr(element.second, functions, is_coroutine);
+		}
+	}
+}
+
+void apply_auto_await(Program& program) {
+	std::unordered_set<std::string> functions;
+	for (const FunctionDecl& function : program.functions) {
+		if (function.auto_await && function.chain_name.empty())
+			functions.insert(function.name);
+	}
+	if (functions.empty()) return;
+	for (FunctionDecl& function : program.functions)
+		auto_await_function(function, functions);
+	for (StructDecl& decl : program.structs)
+		for (FunctionDecl& method : decl.methods)
+			auto_await_function(method, functions);
+}
+
 // Import preloaded script bases into the existing class lowering. Keep the
 // resource constant intact: only the inheritance edge names the private class.
 void import_native_bases(Program &program, const CompilerOptions &options) {
@@ -219,6 +356,7 @@ std::optional<IRProgram> Compiler::compile_to_ir(const std::string& source, cons
 		}
 
 		if (!program.chain.merged()) apply_traits(program);
+		apply_auto_await(program);
 
 		if (options.dump_ast) {
 			std::cout << "=== AST ===" << std::endl;

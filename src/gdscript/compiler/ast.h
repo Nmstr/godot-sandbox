@@ -443,6 +443,8 @@ struct FunctionDecl {
 	std::string doc_comment;
 	// Has AWAIT; gets a resume entry and returns an awaitable.
 	bool is_coroutine = false;
+	// Calls to this function are implicitly awaited by the compiler.
+	bool auto_await = false;
 	// `static func` in a class body: lifted without the instance parameter.
 	bool is_static = false;
 	bool is_abstract = false;

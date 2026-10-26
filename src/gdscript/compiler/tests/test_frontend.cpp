@@ -38,6 +38,42 @@ int main() try {
 	check(empty.has_value() && !compiler.get_error_info().has_error && compiler.get_error().empty(),
 		"Empty success must differ from failure and clear diagnostics");
 
+	auto implicit_await = compiler.compile_to_ir(
+		"@auto_await\n"
+		"func wait_for(sig):\n\treturn await sig\n"
+		"func run(sig):\n\twait_for(sig)\n\treturn 1\n"
+		"func nested(sig, condition):\n"
+		"\tif condition:\n"
+		"\t\tfor i in range(1):\n"
+		"\t\t\twait_for(sig)\n"
+		"\treturn 1\n");
+	check(implicit_await.has_value(), compiler.get_error());
+	ir_verify(*implicit_await);
+	const auto run = std::find_if(implicit_await->functions.begin(), implicit_await->functions.end(),
+		[](const IRFunction& function) { return function.name == "run"; });
+	check(run != implicit_await->functions.end() && run->is_coroutine,
+		"An implicit await did not make its caller a coroutine");
+	if (run != implicit_await->functions.end()) {
+		check(std::count_if(run->instructions.begin(), run->instructions.end(),
+			[](const IRInstruction& instruction) { return instruction.opcode == IROpcode::AWAIT; }) == 1,
+			"An annotated call did not lower to an await");
+	}
+	const auto nested = std::find_if(implicit_await->functions.begin(), implicit_await->functions.end(),
+		[](const IRFunction& function) { return function.name == "nested"; });
+	check(nested != implicit_await->functions.end() && nested->is_coroutine,
+		"An implicit await inside a branch and loop did not make its caller a coroutine");
+	if (nested != implicit_await->functions.end()) {
+		check(std::count_if(nested->instructions.begin(), nested->instructions.end(),
+			[](const IRInstruction& instruction) { return instruction.opcode == IROpcode::AWAIT; }) == 1,
+			"An annotated call inside a branch and loop did not lower to an await");
+	}
+	check(!compiler.compile_to_ir(
+		"@auto_await\n"
+		"func wait_for(sig):\n\treturn await sig\n"
+		"@test\n"
+		"func check_wait():\n\twait_for(null)\n"),
+		"An @test function became a coroutine through @auto_await");
+
 	CompilerOptions options;
 	options.emit_tests = false;
 	auto shipping = compiler.compile_to_ir("@test\nfunc check_answer():\n\tpass\nfunc answer():\n\treturn 42\n", options);

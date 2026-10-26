@@ -100,12 +100,16 @@ Program Parser::parse() {
 			bool is_onready = false;
 			bool is_test = false;
 			bool requires_host_hook = false;
+			bool auto_await = false;
 			std::optional<RPCConfig> rpc_config;
 			ExportHint export_hint;
 			while (check(TokenType::AT)) {
 				is_export = parse_attribute(export_hint, &is_onready, &rpc_config, nullptr,
-					&is_test, &requires_host_hook) || is_export;
+					&is_test, &requires_host_hook, &auto_await) || is_export;
 				skip_newlines();
+			}
+			if (auto_await && !check(TokenType::FUNC)) {
+				error("@auto_await can only be applied to a function");
 			}
 			is_static = match(TokenType::STATIC) || is_static;
 			if (requires_host_hook && (!check(TokenType::FUNC) || is_static || is_test || rpc_config.has_value())) {
@@ -154,6 +158,10 @@ Program Parser::parse() {
 				FunctionDecl function = parse_function();
 				function.is_static = is_static;
 				function.requires_host_hook = requires_host_hook;
+				function.auto_await = auto_await;
+				if (is_test && auto_await) {
+					error("@auto_await cannot be combined with @test", function.line, function.column);
+				}
 				if (is_test) {
 					// The runner invents no argument values, and a suspended
 					// coroutine would return before its assertions ran.
@@ -2831,7 +2839,8 @@ void Parser::skip_type_arguments() {
 }
 
 bool Parser::parse_attribute(ExportHint& hint, bool* is_onready,
-	std::optional<RPCConfig>* rpc_config, bool* is_abstract, bool* is_test, bool* requires_host_hook) {
+	std::optional<RPCConfig>* rpc_config, bool* is_abstract, bool* is_test,
+	bool* requires_host_hook, bool* auto_await) {
 	consume(TokenType::AT, "Expected '@' for attribute");
 
 	const Token& name = consume(TokenType::IDENTIFIER, "Expected an attribute name after '@'");
@@ -2915,6 +2924,19 @@ bool Parser::parse_attribute(ExportHint& hint, bool* is_onready,
 			return false;
 		}
 		*requires_host_hook = true;
+		return false;
+	}
+	if (name.lexeme == "auto_await") {
+		if (auto_await == nullptr) {
+			error("@auto_await is only supported on a file-level function", name.line, name.column);
+			return false;
+		}
+		if (*auto_await || !arguments.empty()) {
+			error("@auto_await takes no arguments and can only be used once per function",
+				name.line, name.column);
+			return false;
+		}
+		*auto_await = true;
 		return false;
 	}
 	if (name.lexeme == "test") {
