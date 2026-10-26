@@ -135,9 +135,14 @@ void Sandbox::promote_frame_handles(Coroutine &co) {
 		if (gv->is_scoped_variant()) {
 			const int32_t idx = int32_t(gv->v.i);
 			if (this->is_permanent_variant(idx)) {
-				// Already promoted by an earlier suspension of this same frame.
 				if (this->permanent_index_valid(idx)) {
-					kept.push_back(idx);
+					// Only retain handles this coroutine promoted itself. A permanent
+					// handle may instead belong to a guest global/member (or another
+					// coroutine); claiming it here would release the owner's value when
+					// this frame no longer references it or completes.
+					if (std::find(co.promoted.begin(), co.promoted.end(), idx) != co.promoted.end()) {
+						kept.push_back(idx);
+					}
 					continue;
 				}
 				gv->type = Variant::NIL;

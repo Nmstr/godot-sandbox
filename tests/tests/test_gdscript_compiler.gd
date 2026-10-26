@@ -9277,9 +9277,20 @@ func computed(dir, name):
 # comes back intact across calls that reset the scoped state it was captured in.
 
 const AWAIT_SOURCE := """
+var api: Dictionary
+
 func wait_for(sig, base):
 	var got = await sig
 	return base + got
+
+func call_host_callable_across_awaits(sig):
+	var retained_api = api
+	retained_api["callback"].call("before")
+	await sig
+	retained_api["callback"].call("after_first")
+	await sig
+	retained_api["callback"].call("after_second")
+	return "done"
 
 func wait_twice(sig):
 	var total = 0
@@ -9343,6 +9354,7 @@ func walk_without_suspending(text : String):
 """
 
 signal sgd_ping(value)
+signal sgd_other_ping(value)
 
 func _await_script(name : String):
 	var path = "user://temp_%s.sgd" % name
@@ -9509,6 +9521,48 @@ func test_sgd_await_two_suspensions():
 	assert_eq(completed[0], null, "still suspended at the second await")
 	sgd_ping.emit(11)
 	assert_eq(completed[0], 16, "the accumulator survived both suspensions")
+
+	node.free()
+
+func test_sgd_await_preserves_host_callable_across_suspensions():
+	var script = _await_script("await_host_callable")
+	if script == null:
+		return
+	var node = _await_node(script)
+	var calls := []
+	var api := {"callback": func(label): calls.append(label)}
+	node.set("api", api)
+	var exceptions := node.get_exceptions()
+
+	var first_completed := [null]
+	var second_completed := [null]
+	(node.call("call_host_callable_across_awaits", sgd_ping) as Signal).connect(
+		func(value): first_completed[0] = value)
+	(node.call("call_host_callable_across_awaits", sgd_other_ping) as Signal).connect(
+		func(value): second_completed[0] = value)
+	assert_eq(calls, ["before", "before"], "the host Callable ran before both suspensions")
+
+	sgd_ping.emit(1)
+	assert_eq(calls, ["before", "before", "after_first"],
+		"the same host Callable ran after the first resume")
+	assert_eq(first_completed[0], null, "the first coroutine remains suspended")
+
+	sgd_ping.emit(2)
+	assert_eq(calls, ["before", "before", "after_first", "after_second"],
+		"the same host Callable ran after the second resume")
+	assert_eq(first_completed[0], "done", "the first coroutine completed normally")
+
+	# Both frames borrow the member's permanent Dictionary handle. Completing one
+	# must not release it out from under the other suspended coroutine.
+	sgd_other_ping.emit(3)
+	assert_eq(calls, ["before", "before", "after_first", "after_second", "after_first"],
+		"the second coroutine's handle survived the first coroutine's retirement")
+	sgd_other_ping.emit(4)
+	assert_eq(calls, ["before", "before", "after_first", "after_second", "after_first",
+		"after_second"], "the Callable remained valid through both of its suspensions")
+	assert_eq(second_completed[0], "done", "the second coroutine completed normally")
+	assert_eq(node.get_exceptions(), exceptions,
+		"Callable and Dictionary handles remained valid across both suspensions")
 
 	node.free()
 
